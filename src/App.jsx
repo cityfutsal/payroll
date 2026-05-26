@@ -1355,10 +1355,67 @@ export default function App(){
                   <ScheduleVsActual employees={currentWeek.employees}/>
                 </div>
 
+                {/* Combined — all locations in one table */}
+                <div style={{border:`1px solid ${T.border}`,borderRadius:14,overflow:"hidden",boxShadow:T.shadow}}>
+                  <div style={{background:`linear-gradient(90deg, ${T.navy} 0%, ${T.navy3} 100%)`,padding:"14px 20px",display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+                    <div style={{color:T.white,fontWeight:900,fontSize:14}}>🏢 Combined — All Locations</div>
+                    <div style={{display:"flex",alignItems:"center",gap:16}}>
+                      <div style={{color:T.white+"99",fontSize:11}}>{currentWeek.employees.length} staff · {fmtHHMM(totalHrs)}</div>
+                      {payDelta!==undefined&&<Delta val={payDelta}/>}
+                      <div style={{color:T.goldf,fontWeight:900,fontSize:18,fontFamily:"'DM Mono',monospace"}}>{fmtUSD(totalPay)}</div>
+                    </div>
+                  </div>
+                  <div style={{background:T.white,overflowX:"auto"}}>
+                    <table style={{width:"100%",borderCollapse:"collapse",fontSize:12}}>
+                      <thead><tr style={{background:T.off}}>
+                        {["Employee","Location","Role","Days","Sched","Worked","Var","Rate","Pay","Δ","Notes"].map(h=>(
+                          <th key={h} style={{padding:"9px 12px",textAlign:["Pay","Rate","Sched","Worked","Var","Δ"].includes(h)?"right":"left",fontSize:9,fontWeight:800,color:T.muted,letterSpacing:"0.08em",textTransform:"uppercase",borderBottom:`1px solid ${T.border}`}}>{h}</th>
+                        ))}
+                      </tr></thead>
+                      <tbody>
+                        {[...currentWeek.employees]
+                          .sort((a,b)=>(a.location||"").localeCompare(b.location||"")||a.lastName.localeCompare(b.lastName))
+                          .map((e,i)=>{
+                            const ce=cmpWeekData?.employees.find(c=>c.firstName===e.firstName&&c.lastName===e.lastName);
+                            const d=ce?((e.pay-ce.pay)/Math.max(ce.pay,1))*100:null;
+                            const varHrs=e.hours-e.scheduledHours;
+                            const locNorm=normalizeVenue(e.location);
+                            const clr=LOC_CLR[locNorm]||LOC_CLR[e.location]||T.muted;
+                            return <tr key={i} style={{background:i%2===0?T.white:"#F9FAFD",borderBottom:`1px solid ${T.border}`}}>
+                              <td style={{padding:"9px 12px",fontWeight:700,color:T.navy}}>{e.firstName} {e.lastName}</td>
+                              <td style={{padding:"9px 12px"}}><Pill color={clr}>{locNorm||e.location||"—"}</Pill></td>
+                              <td style={{padding:"9px 12px"}}><Pill color={ROLE_CLR(e.role)}>{(e.role||"").replace("Senior Host","Sr. Host")}</Pill></td>
+                              <td style={{padding:"9px 12px",textAlign:"center",color:T.muted}}>{e.workedDays||"—"}</td>
+                              <td style={{padding:"9px 12px",textAlign:"right",fontFamily:"'DM Mono',monospace",color:T.muted}}>{e.scheduledHours>0?fmtHHMM(e.scheduledHours):"—"}</td>
+                              <td style={{padding:"9px 12px",textAlign:"right",fontFamily:"'DM Mono',monospace"}}>{fmtHHMM(e.hours)}</td>
+                              <td style={{padding:"9px 12px",textAlign:"right",fontFamily:"'DM Mono',monospace",fontSize:11,fontWeight:700,color:varHrs>0?T.green:varHrs<0?T.red:T.muted}}>
+                                {e.scheduledHours>0?(varHrs>0?"+":"")+fmtHHMM(Math.abs(varHrs)):"—"}
+                              </td>
+                              <td style={{padding:"9px 12px",textAlign:"right",color:T.muted}}>${e.rate}/hr</td>
+                              <td style={{padding:"9px 12px",textAlign:"right",fontFamily:"'DM Mono',monospace",fontWeight:800}}>{fmtUSD(e.pay)}</td>
+                              <td style={{padding:"9px 12px",textAlign:"right"}}>{d!==null?<Delta val={d}/>:"—"}</td>
+                              <td style={{padding:"9px 12px",color:T.muted,fontSize:11,maxWidth:140}}>{e.notes||"—"}</td>
+                            </tr>;
+                          })}
+                        <tr style={{background:T.navy+"08",borderTop:`2px solid ${T.navy}`}}>
+                          <td colSpan={5} style={{padding:"10px 12px",fontWeight:800,color:T.navy,fontSize:11,textAlign:"right",letterSpacing:"0.06em",textTransform:"uppercase"}}>Week Total</td>
+                          <td style={{padding:"10px 12px",textAlign:"right",fontFamily:"'DM Mono',monospace",fontWeight:800,color:T.navy}}>{fmtHHMM(totalHrs)}</td>
+                          <td style={{padding:"10px 12px",textAlign:"right",fontFamily:"'DM Mono',monospace",fontWeight:700,color:totalSched>0?(totalHrs>totalSched?T.green:T.red):T.muted,fontSize:11}}>
+                            {totalSched>0?((totalHrs-totalSched)>0?"+":"")+fmtHHMM(Math.abs(totalHrs-totalSched)):"—"}
+                          </td>
+                          <td/>
+                          <td style={{padding:"10px 12px",textAlign:"right",fontFamily:"'DM Mono',monospace",fontWeight:900,color:T.gold,fontSize:14}}>{fmtUSD(totalPay)}</td>
+                          <td/><td/>
+                        </tr>
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+
                 {/* Location breakdown */}
-                {LOCS.filter(l=>currentWeek.employees.some(e=>e.location===l)).map(l=>{
-                  const emps=currentWeek.employees.filter(e=>e.location===l);
-                  const cmpEmps=cmpWeekData?.employees.filter(e=>e.location===l)||[];
+                {LOCS.filter(l=>currentWeek.employees.some(e=>e.location===l||normalizeVenue(e.location)===l)).map(l=>{
+                  const emps=currentWeek.employees.filter(e=>e.location===l||normalizeVenue(e.location)===l);
+                  const cmpEmps=cmpWeekData?.employees.filter(e=>e.location===l||normalizeVenue(e.location)===l)||[];
                   const total=emps.reduce((s,e)=>s+e.pay,0);
                   const cmpTotal=cmpEmps.reduce((s,e)=>s+e.pay,0);
                   const delta=cmpTotal?((total-cmpTotal)/Math.max(cmpTotal,1))*100:null;
