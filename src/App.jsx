@@ -650,14 +650,19 @@ function WeeklyGantt({week}){
   const [locFilter,setLocFilter]=useState("All");
   if(!week?.employees) return <div style={{textAlign:"center",color:T.muted,padding:40}}>No data.</div>;
 
-  // Get all dates in the week
+  // Get all dates in the week, normalized to ISO, ordered Mon → Sun.
+  // Normalization covers legacy stored data that wasn't ISO (e.g. "Fri May 18").
   const allDates=useMemo(()=>{
     const d=new Set();
-    week.employees.forEach(e=>(e.dailyBreakdown||[]).forEach(b=>d.add(b.date)));
-    return [...d].sort();
+    week.employees.forEach(e=>(e.dailyBreakdown||[]).forEach(b=>{
+      const iso=toDateStr(b.date);
+      if(iso) d.add(iso);
+    }));
+    const dowOrder=s=>{const x=dayOfWeek(s);return x===0?6:x-1;}; // Mon=0..Sun=6
+    return [...d].sort((a,b)=>dowOrder(a)-dowOrder(b));
   },[week]);
 
-  const filtered=week.employees.filter(e=>locFilter==="All"||e.location===locFilter);
+  const filtered=week.employees.filter(e=>locFilter==="All"||e.location===locFilter||normalizeVenue(e.location)===locFilter);
 
   return(
     <div style={{display:"flex",flexDirection:"column",gap:16}}>
@@ -692,8 +697,8 @@ function WeeklyGantt({week}){
             <tbody>
               {filtered.sort((a,b)=>a.lastName.localeCompare(b.lastName)).map((emp,i)=>{
                 const payByDate={};
-                (emp.dailyBreakdown||[]).forEach(d=>{payByDate[d.date]=d.pay;});
-                const clr=LOC_CLR[emp.location]||T.navy;
+                (emp.dailyBreakdown||[]).forEach(d=>{const iso=toDateStr(d.date);if(iso)payByDate[iso]=d.pay;});
+                const clr=LOC_CLR[normalizeVenue(emp.location)]||LOC_CLR[emp.location]||T.navy;
                 return(
                   <tr key={i} style={{background:i%2===0?T.white:"#F9FAFD",borderBottom:`1px solid ${T.border}`}}>
                     <td style={{padding:"10px 14px",position:"sticky",left:0,background:i%2===0?T.white:"#F9FAFD",zIndex:1}}>
@@ -727,7 +732,7 @@ function WeeklyGantt({week}){
               <tr style={{background:T.navy,borderTop:`2px solid ${T.gold}`}}>
                 <td style={{padding:"10px 14px",color:T.gold,fontWeight:800,fontSize:11,position:"sticky",left:0,background:T.navy}} colSpan={2}>DAILY HEADCOUNT</td>
                 {allDates.map(d=>{
-                  const count=filtered.filter(e=>(e.dailyBreakdown||[]).some(b=>b.date===d)).length;
+                  const count=filtered.filter(e=>(e.dailyBreakdown||[]).some(b=>toDateStr(b.date)===d)).length;
                   return(
                     <td key={d} style={{padding:"10px 6px",textAlign:"center"}}>
                       <div style={{background:T.gold+"20",borderRadius:8,padding:"4px 6px",color:T.gold,fontWeight:900,fontSize:14,fontFamily:"'DM Mono',monospace"}}>{count||"—"}</div>
@@ -921,6 +926,7 @@ export default function App(){
   const [compareMode,setCompareMode]=useState("week");
   const [customRange,setCustomRange]=useState({from:"",to:""});
   const [schedLocFilter,setSchedLocFilter]=useState("All");
+  const [reportLocFilter,setReportLocFilter]=useState("all");
   const [formDetail,setFormDetail]=useState(null);
   const [formFilter,setFormFilter]=useState({type:"all",venue:"all",employee:"",weekScope:"all"});
 
@@ -1103,11 +1109,18 @@ export default function App(){
   const sortedKeys=Object.keys(weeks).sort().reverse();
   const currentWeek=selectedWeek?weeks[selectedWeek]:null;
   const cmpWeekData=compareWeek?weeks[compareWeek]:null;
-  const totalPay=currentWeek?.employees.reduce((s,e)=>s+e.pay,0)||0;
-  const totalHrs=currentWeek?.employees.reduce((s,e)=>s+e.hours,0)||0;
-  const totalSched=currentWeek?.employees.reduce((s,e)=>s+e.scheduledHours,0)||0;
-  const totalStaff=currentWeek?new Set(currentWeek.employees.map(e=>`${e.firstName} ${e.lastName}`)).size:0;
-  const priorPay=cmpWeekData?.employees.reduce((s,e)=>s+e.pay,0)||null;
+
+  // Report-tab location filter applied to all employee-derived stats below.
+  const matchLoc=(e,loc)=>loc==="all"||e.location===loc||normalizeVenue(e.location)===loc;
+  const filteredEmps=currentWeek?currentWeek.employees.filter(e=>matchLoc(e,reportLocFilter)):[];
+  const filteredCmpEmps=cmpWeekData?cmpWeekData.employees.filter(e=>matchLoc(e,reportLocFilter)):[];
+  const filteredWeek=currentWeek?(reportLocFilter==="all"?currentWeek:{...currentWeek,employees:filteredEmps}):null;
+
+  const totalPay=filteredEmps.reduce((s,e)=>s+e.pay,0);
+  const totalHrs=filteredEmps.reduce((s,e)=>s+e.hours,0);
+  const totalSched=filteredEmps.reduce((s,e)=>s+e.scheduledHours,0);
+  const totalStaff=new Set(filteredEmps.map(e=>`${e.firstName} ${e.lastName}`)).size;
+  const priorPay=filteredCmpEmps.length?filteredCmpEmps.reduce((s,e)=>s+e.pay,0):null;
   const payDelta=priorPay?((totalPay-priorPay)/Math.max(priorPay,1))*100:undefined;
   const groups=buildGroups(weeks,compareMode,customRange);
   const currentSquare=selectedWeek?squareByWeek[selectedWeek]||[]:[];
@@ -1148,6 +1161,7 @@ export default function App(){
   // ── Sales × Staff attribution: per-day × per-location rows for current week.
   // Normalizes legacy stored data: dailyBreakdown.date may be "Tue May 26" or
   // "5/26/2026" from older parseExcel; employee.location may be full venue name.
+  // Honors reportLocFilter so the table scopes to a single location when chosen.
   const salesAttribution=useMemo(()=>{
     if(!currentWeek||!currentSquare?.length) return [];
     const rows=[];
@@ -1159,8 +1173,9 @@ export default function App(){
         const sales=day.byLocation?(day.byLocation[loc]||0):day.gross;
         if(sales<=0) return;
         const locNorm=normalizeVenue(loc);
+        if(reportLocFilter!=="all"&&locNorm!==reportLocFilter&&loc!==reportLocFilter&&loc!=="Unknown") return;
         const staff=currentWeek.employees
-          .filter(e=>loc==="Unknown"||normalizeVenue(e.location)===locNorm||e.location===loc)
+          .filter(e=>(loc==="Unknown"||normalizeVenue(e.location)===locNorm||e.location===loc)&&matchLoc(e,reportLocFilter))
           .map(e=>{
             const d=(e.dailyBreakdown||[]).find(x=>toDateStr(x.date)===dayIso);
             if(!d) return null;
@@ -1174,14 +1189,15 @@ export default function App(){
       });
     });
     return rows.sort((a,b)=>a.date.localeCompare(b.date)||a.location.localeCompare(b.location));
-  },[currentWeek,currentSquare]);
+  },[currentWeek,currentSquare,reportLocFilter]);
 
   // ── Per-employee sales allocation: each day's location sales split equally
   // among the employees who worked that location that day.
+  // Honors reportLocFilter so allocation scopes to one venue when chosen.
   const salesPerEmployee=useMemo(()=>{
     if(!currentWeek||!currentSquare?.length) return [];
     const map={};
-    currentWeek.employees.forEach(e=>{
+    currentWeek.employees.filter(e=>matchLoc(e,reportLocFilter)).forEach(e=>{
       map[`${e.firstName}|${e.lastName}`]={
         firstName:e.firstName, lastName:e.lastName,
         location:e.location, role:e.role,
@@ -1197,8 +1213,10 @@ export default function App(){
       list.forEach(([loc,sales])=>{
         if(sales<=0) return;
         const locNorm=normalizeVenue(loc);
+        if(reportLocFilter!=="all"&&locNorm!==reportLocFilter&&loc!==reportLocFilter&&loc!=="Unknown") return;
         const workers=currentWeek.employees.filter(e=>
           (loc==="Unknown"||normalizeVenue(e.location)===locNorm||e.location===loc)&&
+          matchLoc(e,reportLocFilter)&&
           (e.dailyBreakdown||[]).some(d=>toDateStr(d.date)===dayIso&&d.pay>0)
         );
         if(!workers.length) return;
@@ -1215,7 +1233,7 @@ export default function App(){
     return Object.values(map)
       .filter(e=>e.salesShare>0)
       .sort((a,b)=>b.salesShare-a.salesShare);
-  },[currentWeek,currentSquare]);
+  },[currentWeek,currentSquare,reportLocFilter]);
 
   if(loading) return <div style={{height:"100vh",display:"flex",alignItems:"center",justifyContent:"center",background:T.navy}}><div style={{textAlign:"center"}}><div style={{width:48,height:48,background:T.gold,borderRadius:12,display:"flex",alignItems:"center",justifyContent:"center",fontWeight:900,color:T.navy,fontSize:20,margin:"0 auto 14px"}}>CF</div><div style={{color:T.white,fontWeight:700}}>Loading…</div></div></div>;
 
@@ -1337,25 +1355,40 @@ export default function App(){
               </div>
             ):(
               <>
+                {/* Location filter — scopes the entire weekly report */}
+                <div style={{display:"flex",gap:8,flexWrap:"wrap",alignItems:"center"}}>
+                  <div style={{fontSize:11,color:T.muted,fontWeight:700,letterSpacing:"0.08em",textTransform:"uppercase",marginRight:4}}>View</div>
+                  {[{id:"all",label:"All Locations (Combined)"},...LOCS.map(l=>({id:l,label:l}))].map(opt=>{
+                    const active=reportLocFilter===opt.id;
+                    const accent=opt.id==="all"?T.gold:(LOC_CLR[opt.id]||T.navy3);
+                    return(
+                      <button key={opt.id} onClick={()=>setReportLocFilter(opt.id)} style={{padding:"7px 16px",borderRadius:8,border:`1px solid ${active?accent:T.border}`,background:active?accent+"14":T.white,color:active?accent:T.navy,fontWeight:700,fontSize:12,cursor:"pointer",fontFamily:"inherit"}}>
+                        {opt.label}
+                      </button>
+                    );
+                  })}
+                </div>
+
                 {/* KPIs */}
                 <div style={{display:"flex",gap:12,flexWrap:"wrap"}}>
-                  <KPI label="Total Payroll"    value={fmtUSD(totalPay)}      sub={currentWeek.period}          accent={T.gold}   delta={payDelta} mono/>
+                  <KPI label={reportLocFilter==="all"?"Total Payroll":`${reportLocFilter} Payroll`} value={fmtUSD(totalPay)} sub={currentWeek.period} accent={T.gold} delta={payDelta} mono/>
                   <KPI label="Hours Worked"     value={fmtHHMM(totalHrs)}     sub={totalSched>0?`Sched: ${fmtHHMM(totalSched)}`:""}  accent={T.navy3} mono/>
                   {totalSched>0&&<KPI label="Schedule Var."  value={fmtHHMMsigned(totalHrs-totalSched)} sub={totalHrs>totalSched?"over schedule":"under schedule"} accent={totalHrs>totalSched?T.green:T.red} mono/>}
-                  <KPI label="Active Staff"     value={totalStaff}            sub="this week"                   accent={T.colony}/>
-                  {currentSquare.length>0&&<KPI label="Square Sales" value={fmtUSD(currentSquare.reduce((s,d)=>s+d.gross,0))} sub={`${currentSquare.length} days`} accent={T.gold} mono/>}
+                  <KPI label="Active Staff"     value={totalStaff}            sub={reportLocFilter==="all"?"this week":`at ${reportLocFilter}`} accent={T.colony}/>
+                  {currentSquare.length>0&&(()=>{const sq=reportLocFilter==="all"?currentSquare.reduce((s,d)=>s+d.gross,0):currentSquare.reduce((s,d)=>s+(d.byLocation?(d.byLocation[reportLocFilter]||0):0),0);return <KPI label="Square Sales" value={fmtUSD(sq)} sub={`${currentSquare.length} days`} accent={T.gold} mono/>;})()}
                 </div>
 
                 {/* Staffing + Sales chart */}
-                <StaffingActivityChart week={currentWeek} squareData={currentSquare}/>
+                <StaffingActivityChart week={filteredWeek} squareData={currentSquare}/>
 
                 {/* Schedule vs Actual */}
                 <div style={{background:T.white,border:`1px solid ${T.border}`,borderRadius:14,padding:22,boxShadow:T.shadow}}>
-                  <div style={{fontWeight:800,color:T.navy,fontSize:15,marginBottom:16}}>⏱ Scheduled vs Worked Hours</div>
-                  <ScheduleVsActual employees={currentWeek.employees}/>
+                  <div style={{fontWeight:800,color:T.navy,fontSize:15,marginBottom:16}}>⏱ Scheduled vs Worked Hours{reportLocFilter!=="all"?` — ${reportLocFilter}`:""}</div>
+                  <ScheduleVsActual employees={filteredEmps}/>
                 </div>
 
-                {/* Combined — all locations in one table */}
+                {/* Combined — all locations in one table (only when "all" selected) */}
+                {reportLocFilter==="all"&&(
                 <div style={{border:`1px solid ${T.border}`,borderRadius:14,overflow:"hidden",boxShadow:T.shadow}}>
                   <div style={{background:`linear-gradient(90deg, ${T.navy} 0%, ${T.navy3} 100%)`,padding:"14px 20px",display:"flex",justifyContent:"space-between",alignItems:"center"}}>
                     <div style={{color:T.white,fontWeight:900,fontSize:14}}>🏢 Combined — All Locations</div>
@@ -1373,7 +1406,7 @@ export default function App(){
                         ))}
                       </tr></thead>
                       <tbody>
-                        {[...currentWeek.employees]
+                        {[...filteredEmps]
                           .sort((a,b)=>(a.location||"").localeCompare(b.location||"")||a.lastName.localeCompare(b.lastName))
                           .map((e,i)=>{
                             const ce=cmpWeekData?.employees.find(c=>c.firstName===e.firstName&&c.lastName===e.lastName);
@@ -1411,9 +1444,14 @@ export default function App(){
                     </table>
                   </div>
                 </div>
+                )}
 
-                {/* Location breakdown */}
-                {LOCS.filter(l=>currentWeek.employees.some(e=>e.location===l||normalizeVenue(e.location)===l)).map(l=>{
+                {/* Location breakdown — when filter is "all", show all locations;
+                    when a specific location is picked, show only that one's table. */}
+                {LOCS
+                  .filter(l=>reportLocFilter==="all"||l===reportLocFilter)
+                  .filter(l=>currentWeek.employees.some(e=>e.location===l||normalizeVenue(e.location)===l))
+                  .map(l=>{
                   const emps=currentWeek.employees.filter(e=>e.location===l||normalizeVenue(e.location)===l);
                   const cmpEmps=cmpWeekData?.employees.filter(e=>e.location===l||normalizeVenue(e.location)===l)||[];
                   const total=emps.reduce((s,e)=>s+e.pay,0);
