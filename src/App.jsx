@@ -1038,6 +1038,27 @@ export default function App(){
     setDeleteConfirm(null);toast2("Week deleted","err");
   };
 
+  const handleDelAtt=async k=>{
+    const att=attachments[k];
+    const weekK=att?.weekKey;
+    const wasSquare=att?.type==="square";
+    await delAtt(k);
+    const updated={...attachments};delete updated[k];
+    setAttachments(updated);
+    if(wasSquare&&weekK){
+      const remaining=Object.values(updated)
+        .filter(v=>v.type==="square"&&v.weekKey===weekK)
+        .flatMap(v=>v.parsedData||[]);
+      setSquareByWeek(sq=>{
+        const u={...sq};
+        if(remaining.length) u[weekK]=aggregateSquareRows(remaining);
+        else delete u[weekK];
+        return u;
+      });
+    }
+    toast2(`${att?.name||"Upload"} deleted`,"err");
+  };
+
   const handleExport=()=>{
     const payload={weeks,attachments,squareByWeek,exportedAt:new Date().toISOString(),exportedBy:"CFH Payroll Dashboard"};
     const blob=new Blob([JSON.stringify(payload,null,2)],{type:"application/json"});
@@ -1139,6 +1160,45 @@ export default function App(){
       });
     });
     return rows.sort((a,b)=>a.date.localeCompare(b.date)||a.location.localeCompare(b.location));
+  },[currentWeek,currentSquare]);
+
+  // ── Per-employee sales allocation: each day's location sales split equally
+  // among the employees who worked that location that day.
+  const salesPerEmployee=useMemo(()=>{
+    if(!currentWeek||!currentSquare?.length) return [];
+    const map={};
+    currentWeek.employees.forEach(e=>{
+      map[`${e.firstName}|${e.lastName}`]={
+        firstName:e.firstName, lastName:e.lastName,
+        location:e.location, role:e.role,
+        pay:e.pay, hours:e.hours,
+        salesShare:0, daysWithSales:0,
+        breakdown:[],
+      };
+    });
+    currentSquare.forEach(day=>{
+      const dailyLocs=day.byLocation?Object.entries(day.byLocation):[];
+      const list=dailyLocs.length?dailyLocs:(day.gross>0?[["Unknown",day.gross]]:[]);
+      list.forEach(([loc,sales])=>{
+        if(sales<=0) return;
+        const workers=currentWeek.employees.filter(e=>
+          (loc==="Unknown"||e.location===loc)&&
+          (e.dailyBreakdown||[]).some(d=>d.date===day.date&&d.pay>0)
+        );
+        if(!workers.length) return;
+        const share=sales/workers.length;
+        workers.forEach(e=>{
+          const k=`${e.firstName}|${e.lastName}`;
+          if(!map[k]) return;
+          map[k].salesShare+=share;
+          map[k].daysWithSales+=1;
+          map[k].breakdown.push({date:day.date,location:loc,daySales:sales,workers:workers.length,share});
+        });
+      });
+    });
+    return Object.values(map)
+      .filter(e=>e.salesShare>0)
+      .sort((a,b)=>b.salesShare-a.salesShare);
   },[currentWeek,currentSquare]);
 
   if(loading) return <div style={{height:"100vh",display:"flex",alignItems:"center",justifyContent:"center",background:T.navy}}><div style={{textAlign:"center"}}><div style={{width:48,height:48,background:T.gold,borderRadius:12,display:"flex",alignItems:"center",justifyContent:"center",fontWeight:900,color:T.navy,fontSize:20,margin:"0 auto 14px"}}>CF</div><div style={{color:T.white,fontWeight:700}}>Loading…</div></div></div>;
@@ -1379,11 +1439,69 @@ export default function App(){
                   </div>
                 )}
 
+                {/* Sales allocated per employee (equal split per workers/day) */}
+                {salesPerEmployee.length>0&&(
+                  <div style={{background:T.white,border:`1px solid ${T.border}`,borderRadius:14,padding:22,boxShadow:T.shadow}}>
+                    <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-end",marginBottom:6,flexWrap:"wrap",gap:8}}>
+                      <div>
+                        <div style={{fontWeight:800,color:T.navy,fontSize:15}}>🧑‍🤝‍🧑 Sales Allocated per Employee</div>
+                        <div style={{color:T.muted,fontSize:12,marginTop:3}}>Each day's location sales split equally among the employees who worked that location that day.</div>
+                      </div>
+                      <div style={{fontSize:11,color:T.muted}}>Total allocated: <strong style={{color:T.gold,fontFamily:"'DM Mono',monospace"}}>{fmtUSD(salesPerEmployee.reduce((s,e)=>s+e.salesShare,0))}</strong></div>
+                    </div>
+                    <div style={{overflowX:"auto",marginTop:14}}>
+                      <table style={{width:"100%",borderCollapse:"collapse",fontSize:12}}>
+                        <thead><tr style={{background:T.off}}>
+                          {["Employee","Location","Days w/ Sales","Hours","Pay","Sales Share","$ per Hour"].map(h=>(
+                            <th key={h} style={{padding:"9px 12px",textAlign:["Days w/ Sales","Hours","Pay","Sales Share","$ per Hour"].includes(h)?"right":"left",fontSize:9,fontWeight:800,color:T.muted,letterSpacing:"0.08em",textTransform:"uppercase",borderBottom:`1px solid ${T.border}`}}>{h}</th>
+                          ))}
+                        </tr></thead>
+                        <tbody>
+                          {salesPerEmployee.map((e,i)=>(
+                            <tr key={i} style={{borderBottom:`1px solid ${T.border}`,background:i%2===0?T.white:"#F9FAFD"}}>
+                              <td style={{padding:"10px 12px",fontWeight:700,color:T.navy}} title={e.breakdown.map(b=>`${b.date} · ${b.location}: ${fmtUSD(b.daySales)} ÷ ${b.workers} = ${fmtUSD(b.share)}`).join("\n")}>{e.firstName} {e.lastName}</td>
+                              <td style={{padding:"10px 12px"}}><Pill color={LOC_CLR[e.location]||T.muted}>{e.location||"—"}</Pill></td>
+                              <td style={{padding:"10px 12px",textAlign:"right",fontFamily:"'DM Mono',monospace",color:T.muted}}>{e.daysWithSales}</td>
+                              <td style={{padding:"10px 12px",textAlign:"right",fontFamily:"'DM Mono',monospace",color:T.muted}}>{fmtHHMM(e.hours)}</td>
+                              <td style={{padding:"10px 12px",textAlign:"right",fontFamily:"'DM Mono',monospace",color:T.navy}}>{fmtUSD(e.pay)}</td>
+                              <td style={{padding:"10px 12px",textAlign:"right",fontFamily:"'DM Mono',monospace",fontWeight:800,color:T.gold}}>{fmtUSD(e.salesShare)}</td>
+                              <td style={{padding:"10px 12px",textAlign:"right",fontFamily:"'DM Mono',monospace",color:e.hours>0?T.green:T.muted}}>{e.hours>0?fmtUSD(e.salesShare/e.hours):"—"}</td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                    <div style={{fontSize:10,color:T.muted,marginTop:10,fontStyle:"italic"}}>Hover an employee name to see the per-day breakdown.</div>
+                  </div>
+                )}
+
                 {/* Square + Forms upload */}
                 <div style={{background:T.white,border:`1px solid ${T.border}`,borderRadius:14,padding:22,boxShadow:T.shadow}}>
                   <div style={{fontWeight:800,color:T.navy,fontSize:15,marginBottom:16}}>📎 Sales & Documents — {currentWeek.period}</div>
                   <SquarePanel weekKey={selectedWeek} squareData={currentSquare}
                     onUpload={(files,type)=>type==="square"?handleSquareUpload(files,selectedWeek):handleFormUpload(files,selectedWeek)}/>
+                  {weekAttachments.filter(({v})=>v.type==="square").length>0&&(
+                    <div style={{marginTop:16}}>
+                      <div style={{fontWeight:700,color:T.navy,fontSize:13,marginBottom:10}}>🟦 Uploaded Square Reports</div>
+                      {weekAttachments.filter(({v})=>v.type==="square").map(({k,v})=>{
+                        const rows=v.parsedData||[];
+                        const total=rows.reduce((s,r)=>s+(+r.gross||0),0);
+                        const locs=[...new Set(rows.map(r=>r.location).filter(Boolean))];
+                        return(
+                          <div key={k} style={{display:"flex",alignItems:"center",gap:10,padding:"10px 14px",background:T.off,borderRadius:9,marginBottom:6,border:`1px solid ${T.border}`}}>
+                            <span style={{fontSize:18}}>🟦</span>
+                            <div style={{flex:1,minWidth:0}}>
+                              <div style={{fontWeight:700,color:T.navy,fontSize:12,overflow:"hidden",textOverflow:"ellipsis"}}>{v.name}</div>
+                              <div style={{fontSize:10,color:T.muted,marginTop:2}}>
+                                {rows.length>0?<>{rows.length} day{rows.length===1?"":"s"} · <strong style={{color:T.gold,fontFamily:"'DM Mono',monospace"}}>{fmtUSD(total)}</strong>{locs.length?<> · {locs.join(", ")}</>:null}</>:<>uploaded {new Date(v.uploadedAt).toLocaleDateString()}</>}
+                              </div>
+                            </div>
+                            <button onClick={()=>handleDelAtt(k)} title="Delete this upload" style={{background:"none",border:`1px solid ${T.border}`,color:T.red,cursor:"pointer",fontSize:13,padding:"4px 10px",borderRadius:6,fontFamily:"inherit",fontWeight:700}}>Delete</button>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  )}
                   {weekAttachments.filter(({v})=>v.type==="form").length>0&&(
                     <div style={{marginTop:16}}>
                       <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:10}}>
@@ -1403,7 +1521,7 @@ export default function App(){
                                   {subs.length>0?<>{t.label} · <strong style={{color:T.navy}}>{subs.length}</strong> submission{subs.length===1?"":"s"} from {new Set(subs.map(s=>s.submittedBy)).size} employee{new Set(subs.map(s=>s.submittedBy)).size===1?"":"s"}</>:<>Attached {new Date(v.uploadedAt).toLocaleDateString()} (not parsed)</>}
                                 </div>
                               </div>
-                              <button onClick={async()=>{await delAtt(k);setAttachments(a=>{const u={...a};delete u[k];return u;});}} style={{background:"none",border:"none",color:T.red,cursor:"pointer",fontSize:16}}>×</button>
+                              <button onClick={()=>handleDelAtt(k)} title="Delete this upload" style={{background:"none",border:"none",color:T.red,cursor:"pointer",fontSize:16}}>×</button>
                             </div>
                             {subs.length>0&&(
                               <div style={{marginTop:8,paddingTop:8,borderTop:`1px solid ${T.border}`,display:"flex",flexWrap:"wrap",gap:6}}>
