@@ -170,6 +170,35 @@ async function parseExcel(file){
           }
         }
 
+        // SECOND PASS — summary-style exports have a "Dates" / "Days Worked"
+        // cell listing multiple dates as text (e.g. "5/18/2026, 5/19/2026,...").
+        // Parse those into dailyBreakdown so sales attribution works for that
+        // format too. Tagged fromSummary so downstream code knows pay is an
+        // estimate (total pay / day count), not a per-row value.
+        for(const o of rowObjs){
+          const rawFirst=String(get(o,"first name","first_name","firstname")||"").trim();
+          const rawLast =String(get(o,"last name","last_name","lastname")||"").trim();
+          if(!rawFirst||!rawLast||rawFirst.toLowerCase()==="undefined") continue;
+          const first=rawFirst.charAt(0).toUpperCase()+rawFirst.slice(1);
+          const last=rawLast.split(/\s+/).map(w=>w.charAt(0).toUpperCase()+w.slice(1)).join(" ");
+          const emp=empMap[`${first}|${last}`];
+          if(!emp) continue;
+          // Look at every cell except the single-date one we already processed.
+          for(const [colHdr,v] of Object.entries(o)){
+            if(!v||colHdr==="date") continue;
+            const matches=String(v).match(/\b\d{1,2}\/\d{1,2}\/\d{2,4}\b|\b\d{4}-\d{2}-\d{2}\b/g);
+            if(!matches||matches.length<2) continue;
+            const parsed=matches.map(t=>toDateStr(t)).filter(d=>/^\d{4}-\d{2}-\d{2}$/.test(d));
+            const unique=[...new Set(parsed)];
+            const existing=new Set((emp.dailyBreakdown||[]).map(d=>d.date));
+            const fresh=unique.filter(d=>!existing.has(d));
+            if(!fresh.length) continue;
+            const totalDays=(emp.dailyBreakdown.length+fresh.length)||emp.workedDays||fresh.length;
+            const perDay=emp.pay>0&&totalDays>0?emp.pay/totalDays:0;
+            fresh.forEach(d=>emp.dailyBreakdown.push({date:d,pay:perDay,rate:emp.rate,fromSummary:true}));
+          }
+        }
+
         const result=Object.values(empMap)
           .filter(e=>e.firstName&&e.lastName)
           .map(e=>{
@@ -1281,7 +1310,7 @@ export default function App(){
             const d=(e.dailyBreakdown||[]).find(x=>toDateStr(x.date)===dayIso);
             if(!d) return null;
             const hours=d.rate>0?d.pay/d.rate:0;
-            return hours>0?{name:`${e.firstName} ${e.lastName.charAt(0)}.`,fullName:`${e.firstName} ${e.lastName}`,hours,pay:d.pay,rate:d.rate}:null;
+            return (hours>0||d.fromSummary)?{name:`${e.firstName} ${e.lastName.charAt(0)}.`,fullName:`${e.firstName} ${e.lastName}`,hours,pay:d.pay,rate:d.rate}:null;
           })
           .filter(Boolean)
           .sort((a,b)=>b.hours-a.hours);
@@ -1318,7 +1347,7 @@ export default function App(){
         const workers=currentWeek.employees.filter(e=>
           (loc==="Unknown"||normalizeVenue(e.location)===locNorm||e.location===loc)&&
           matchLoc(e,reportLocFilter)&&
-          (e.dailyBreakdown||[]).some(d=>toDateStr(d.date)===dayIso&&d.pay>0)
+          (e.dailyBreakdown||[]).some(d=>toDateStr(d.date)===dayIso&&(d.pay>0||d.fromSummary))
         );
         if(!workers.length) return;
         const share=sales/workers.length;
@@ -1353,7 +1382,7 @@ export default function App(){
       const workersByDay={};
       currentSquare.forEach(day=>{
         const dayIso=toDateStr(day.date);
-        workersByDay[dayIso]=locEmps.filter(em=>(em.dailyBreakdown||[]).some(d=>toDateStr(d.date)===dayIso&&d.pay>0));
+        workersByDay[dayIso]=locEmps.filter(em=>(em.dailyBreakdown||[]).some(d=>toDateStr(d.date)===dayIso&&(d.pay>0||d.fromSummary)));
       });
       const empData=locEmps.map(e=>{
         const shifts=(e.dailyBreakdown||[]).filter(d=>d.pay>0).length;
@@ -1363,7 +1392,7 @@ export default function App(){
           const sales=day.byLocation?(day.byLocation[loc]||0):(loc==="Unknown"?day.gross:0);
           if(sales<=0) return;
           const dayWorkers=workersByDay[dayIso]?.length||0;
-          const worked=(e.dailyBreakdown||[]).some(d=>toDateStr(d.date)===dayIso&&d.pay>0);
+          const worked=(e.dailyBreakdown||[]).some(d=>toDateStr(d.date)===dayIso&&(d.pay>0||d.fromSummary));
           if(worked&&dayWorkers>0) actual+=sales/dayWorkers;
         });
         return {firstName:e.firstName,lastName:e.lastName,role:e.role,shifts,actual};
