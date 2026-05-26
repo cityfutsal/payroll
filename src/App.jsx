@@ -23,6 +23,10 @@ const T = {
 const LOCS = ["Dallas","The Colony"];
 const LOC_CLR = {"Dallas":T.dallas,"The Colony":T.colony};
 
+// Per-location weekly Square sales goal (Venue Team target).
+const GOAL_MIN = 3600;
+const GOAL_MAX = 7000;
+
 const FORM_TYPES = {
   preopen: {id:"preopen", label:"Pre-Open Checklist", icon:"☀️", color:"#B86A00"},
   closing: {id:"closing", label:"Closing Checklist",  icon:"🌙", color:"#1A3460"},
@@ -466,6 +470,25 @@ function UploadZone({onFiles,label,sub,accept=".xlsx,.xls,.pdf,.csv",icon="📂"
       <div style={{fontSize:compact?20:26,marginBottom:6}}>{icon}</div>
       <div style={{fontWeight:800,color:T.navy,fontSize:compact?12:14}}>{label}</div>
       {sub&&<div style={{fontSize:11,color:T.muted,marginTop:4}}>{sub}</div>}
+    </div>
+  );
+}
+
+/* ─── COLLAPSIBLE SECTION ─────────────────────────────────────────────────── */
+function Section({title,icon,subtitle,right,defaultOpen=false,children}){
+  const [open,setOpen]=useState(defaultOpen);
+  return(
+    <div style={{background:T.white,border:`1px solid ${T.border}`,borderRadius:14,boxShadow:T.shadow,overflow:"hidden"}}>
+      <button onClick={()=>setOpen(o=>!o)} style={{width:"100%",display:"flex",alignItems:"center",gap:12,padding:"14px 20px",background:"transparent",border:"none",cursor:"pointer",fontFamily:"inherit",textAlign:"left"}}>
+        {icon&&<span style={{fontSize:18,lineHeight:1}}>{icon}</span>}
+        <div style={{flex:1,minWidth:0}}>
+          <div style={{fontWeight:800,color:T.navy,fontSize:14}}>{title}</div>
+          {subtitle&&<div style={{color:T.muted,fontSize:11,marginTop:2}}>{subtitle}</div>}
+        </div>
+        {right}
+        <span style={{color:T.muted,fontSize:18,display:"inline-block",transform:`rotate(${open?90:0}deg)`,transition:"transform .18s",lineHeight:1}}>›</span>
+      </button>
+      {open&&<div style={{padding:"4px 20px 22px",borderTop:`1px solid ${T.border}`}}>{children}</div>}
     </div>
   );
 }
@@ -1313,6 +1336,48 @@ export default function App(){
       .sort((a,b)=>b.salesShare-a.salesShare);
   },[currentWeek,currentSquare,reportLocFilter]);
 
+  // ── Per-venue Goal Performance: actual share vs expected (shift-proportional)
+  // share of weekly sales. Per the team rule, an employee who worked 3 of 30
+  // shifts should produce at least 10% of the weekly sales total at that venue.
+  const goalPerformance=useMemo(()=>{
+    if(!currentWeek||!currentSquare?.length) return [];
+    const locsToReport=reportLocFilter==="all"?LOCS:[reportLocFilter];
+    return locsToReport.map(loc=>{
+      // Total Square sales at this location for the week
+      const weekTotal=currentSquare.reduce((s,day)=>{
+        const v=day.byLocation?(day.byLocation[loc]||0):(loc==="Unknown"?day.gross:0);
+        return s+v;
+      },0);
+      const locEmps=currentWeek.employees.filter(e=>matchLoc(e,loc));
+      // Pre-index workers per day for this venue
+      const workersByDay={};
+      currentSquare.forEach(day=>{
+        const dayIso=toDateStr(day.date);
+        workersByDay[dayIso]=locEmps.filter(em=>(em.dailyBreakdown||[]).some(d=>toDateStr(d.date)===dayIso&&d.pay>0));
+      });
+      const empData=locEmps.map(e=>{
+        const shifts=(e.dailyBreakdown||[]).filter(d=>d.pay>0).length;
+        let actual=0;
+        currentSquare.forEach(day=>{
+          const dayIso=toDateStr(day.date);
+          const sales=day.byLocation?(day.byLocation[loc]||0):(loc==="Unknown"?day.gross:0);
+          if(sales<=0) return;
+          const dayWorkers=workersByDay[dayIso]?.length||0;
+          const worked=(e.dailyBreakdown||[]).some(d=>toDateStr(d.date)===dayIso&&d.pay>0);
+          if(worked&&dayWorkers>0) actual+=sales/dayWorkers;
+        });
+        return {firstName:e.firstName,lastName:e.lastName,role:e.role,shifts,actual};
+      }).filter(e=>e.shifts>0);
+      const totalShifts=empData.reduce((s,e)=>s+e.shifts,0);
+      const employees=empData.map(e=>{
+        const expected=totalShifts>0?(e.shifts/totalShifts)*weekTotal:0;
+        return {...e,expected,status:e.actual>=expected?"above":"below",deltaPct:expected>0?((e.actual-expected)/expected)*100:0};
+      }).sort((a,b)=>b.actual-a.actual);
+      const teamStatus=weekTotal>=GOAL_MAX?"exceeded":weekTotal>=GOAL_MIN?"met":"below";
+      return {location:loc,weekTotal,totalShifts,employees,teamStatus};
+    }).filter(r=>r.weekTotal>0||r.employees.length>0);
+  },[currentWeek,currentSquare,reportLocFilter]);
+
   if(!authed) return <PasswordGate onAuth={()=>setAuthed(true)}/>;
   if(loading) return <div style={{height:"100vh",display:"flex",alignItems:"center",justifyContent:"center",background:T.navy}}><div style={{textAlign:"center"}}><div style={{width:48,height:48,background:T.gold,borderRadius:12,display:"flex",alignItems:"center",justifyContent:"center",fontWeight:900,color:T.navy,fontSize:20,margin:"0 auto 14px"}}>CF</div><div style={{color:T.white,fontWeight:700}}>Loading…</div></div></div>;
 
@@ -1457,14 +1522,45 @@ export default function App(){
                   {currentSquare.length>0&&(()=>{const sq=reportLocFilter==="all"?currentSquare.reduce((s,d)=>s+d.gross,0):currentSquare.reduce((s,d)=>s+(d.byLocation?(d.byLocation[reportLocFilter]||0):0),0);return <KPI label="Square Sales" value={fmtUSD(sq)} sub={`${currentSquare.length} days`} accent={T.gold} mono/>;})()}
                 </div>
 
-                {/* Staffing + Sales chart */}
-                <StaffingActivityChart week={filteredWeek} squareData={currentSquare}/>
-
-                {/* Schedule vs Actual */}
-                <div style={{background:T.white,border:`1px solid ${T.border}`,borderRadius:14,padding:22,boxShadow:T.shadow}}>
-                  <div style={{fontWeight:800,color:T.navy,fontSize:15,marginBottom:16}}>⏱ Scheduled vs Worked Hours{reportLocFilter!=="all"?` — ${reportLocFilter}`:""}</div>
-                  <ScheduleVsActual employees={filteredEmps}/>
-                </div>
+                {/* Sales Summary callout — total + per-location vs goal */}
+                {currentSquare.length>0&&(()=>{
+                  const locsShown=reportLocFilter==="all"?LOCS:[reportLocFilter];
+                  const perLoc=locsShown.map(loc=>({
+                    location:loc,
+                    total:currentSquare.reduce((s,d)=>s+(d.byLocation?(d.byLocation[loc]||0):0),0),
+                  }));
+                  const grand=perLoc.reduce((s,p)=>s+p.total,0);
+                  const fmtStatus=t=>t>=GOAL_MAX?{label:"Exceeded",clr:T.green,bg:T.greenl}:t>=GOAL_MIN?{label:"On Goal",clr:T.green,bg:T.greenl}:{label:"Below Goal",clr:T.red,bg:T.redl};
+                  return(
+                    <div style={{background:`linear-gradient(135deg, ${T.navy} 0%, ${T.navy2} 100%)`,borderRadius:14,padding:"22px 26px",color:T.white,boxShadow:T.shadow2}}>
+                      <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",flexWrap:"wrap",gap:14}}>
+                        <div>
+                          <div style={{fontSize:10,fontWeight:800,color:T.gold,letterSpacing:"0.14em",textTransform:"uppercase",marginBottom:4}}>Square Sales · This Week</div>
+                          <div style={{fontFamily:"'DM Mono',monospace",fontSize:32,fontWeight:900,color:T.white,lineHeight:1.1}}>{fmtUSD(grand)}</div>
+                          <div style={{fontSize:11,color:T.white+"88",marginTop:4}}>{currentSquare.length} day{currentSquare.length===1?"":"s"} · {currentWeek.period}</div>
+                        </div>
+                        <div style={{display:"flex",flexWrap:"wrap",gap:10}}>
+                          {perLoc.map(p=>{
+                            const s=fmtStatus(p.total);
+                            return(
+                              <div key={p.location} style={{background:T.white+"0E",border:`1px solid ${T.white}20`,borderRadius:10,padding:"10px 14px",minWidth:180}}>
+                                <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:4}}>
+                                  <div style={{width:10,height:10,borderRadius:"50%",background:LOC_CLR[p.location]||T.gold}}/>
+                                  <div style={{fontSize:12,fontWeight:700,color:T.white}}>{p.location}</div>
+                                </div>
+                                <div style={{fontFamily:"'DM Mono',monospace",fontSize:18,fontWeight:800,color:T.goldf}}>{fmtUSD(p.total)}</div>
+                                <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginTop:6}}>
+                                  <div style={{fontSize:9,color:T.white+"66"}}>Goal: ${(GOAL_MIN/1000).toFixed(1)}k–${(GOAL_MAX/1000).toFixed(0)}k</div>
+                                  <span style={{background:s.clr+"30",color:s.clr==="#0F7A52"?"#A7E8C8":s.clr==="#C0392B"?"#F8B6AE":T.gold,border:`1px solid ${s.clr}55`,borderRadius:20,padding:"2px 8px",fontSize:9,fontWeight:800,letterSpacing:"0.05em",textTransform:"uppercase"}}>{s.label}</span>
+                                </div>
+                              </div>
+                            );
+                          })}
+                        </div>
+                      </div>
+                    </div>
+                  );
+                })()}
 
                 {/* Combined — all locations in one table (only when "all" selected) */}
                 {reportLocFilter==="all"&&(
@@ -1585,17 +1681,85 @@ export default function App(){
                   );
                 })}
 
-                {/* Sales × Staff attribution */}
-                {salesAttribution.length>0&&(
-                  <div style={{background:T.white,border:`1px solid ${T.border}`,borderRadius:14,padding:22,boxShadow:T.shadow}}>
-                    <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-end",marginBottom:6,flexWrap:"wrap",gap:8}}>
-                      <div>
-                        <div style={{fontWeight:800,color:T.navy,fontSize:15}}>💰 Sales × Staff — by Day</div>
-                        <div style={{color:T.muted,fontSize:12,marginTop:3}}>Who was on the floor when sales came in, per location.</div>
+                {/* GOAL PERFORMANCE — per-location, expected vs actual share */}
+                {goalPerformance.length>0&&goalPerformance.map(gp=>{
+                  const teamPill=gp.teamStatus==="exceeded"?{label:"Goal Exceeded",bg:T.green,fg:T.white}:gp.teamStatus==="met"?{label:"On Goal",bg:T.green,fg:T.white}:{label:"Below Goal",bg:T.red,fg:T.white};
+                  const pct=gp.weekTotal/GOAL_MAX*100;
+                  const progressClr=gp.teamStatus==="below"?T.red:T.green;
+                  const above=gp.employees.filter(e=>e.status==="above").length;
+                  const below=gp.employees.filter(e=>e.status==="below").length;
+                  return(
+                    <div key={gp.location} style={{background:T.white,border:`1px solid ${T.border}`,borderRadius:14,boxShadow:T.shadow,overflow:"hidden"}}>
+                      <div style={{background:LOC_CLR[gp.location]||T.navy3,padding:"14px 20px",color:T.white,display:"flex",justifyContent:"space-between",alignItems:"center",flexWrap:"wrap",gap:10}}>
+                        <div>
+                          <div style={{fontSize:10,fontWeight:800,letterSpacing:"0.1em",textTransform:"uppercase",color:T.white+"BB"}}>🎯 Goal Performance</div>
+                          <div style={{fontWeight:900,fontSize:16,marginTop:2}}>{gp.location}</div>
+                        </div>
+                        <div style={{display:"flex",alignItems:"center",gap:14}}>
+                          <div style={{textAlign:"right"}}>
+                            <div style={{fontSize:10,color:T.white+"99"}}>This Week</div>
+                            <div style={{fontFamily:"'DM Mono',monospace",fontWeight:900,fontSize:18}}>{fmtUSD(gp.weekTotal)}</div>
+                          </div>
+                          <span style={{background:teamPill.bg,color:teamPill.fg,padding:"4px 10px",borderRadius:20,fontSize:10,fontWeight:800,letterSpacing:"0.05em",textTransform:"uppercase"}}>{teamPill.label}</span>
+                        </div>
                       </div>
-                      <div style={{fontSize:11,color:T.muted}}>{salesAttribution.length} day-location rows</div>
+                      <div style={{padding:"16px 20px",borderBottom:`1px solid ${T.border}`}}>
+                        <div style={{display:"flex",justifyContent:"space-between",fontSize:10,color:T.muted,marginBottom:6}}>
+                          <span>$0</span><span>Min ${(GOAL_MIN/1000).toFixed(1)}k</span><span>Max ${(GOAL_MAX/1000).toFixed(0)}k</span>
+                        </div>
+                        <div style={{position:"relative",height:10,background:T.off,borderRadius:5,overflow:"hidden"}}>
+                          <div style={{position:"absolute",left:`${GOAL_MIN/GOAL_MAX*100}%`,top:0,bottom:0,width:1,background:T.navy3,zIndex:2}}/>
+                          <div style={{height:"100%",width:`${Math.min(100,pct)}%`,background:progressClr,transition:"width .3s"}}/>
+                        </div>
+                        <div style={{marginTop:10,fontSize:11,color:T.muted}}>
+                          {gp.employees.length} employee{gp.employees.length===1?"":"s"} worked · {gp.totalShifts} shift{gp.totalShifts===1?"":"s"} · <span style={{color:T.green,fontWeight:700}}>{above} at/above</span> · <span style={{color:T.red,fontWeight:700}}>{below} below</span>
+                        </div>
+                      </div>
+                      <div style={{overflowX:"auto"}}>
+                        <table style={{width:"100%",borderCollapse:"collapse",fontSize:12}}>
+                          <thead><tr style={{background:T.off}}>
+                            {["Employee","Shifts","% of Team","Expected","Actual","vs Expected","Status"].map(h=>(
+                              <th key={h} style={{padding:"9px 12px",textAlign:["Shifts","% of Team","Expected","Actual","vs Expected"].includes(h)?"right":"left",fontSize:9,fontWeight:800,color:T.muted,letterSpacing:"0.08em",textTransform:"uppercase",borderBottom:`1px solid ${T.border}`}}>{h}</th>
+                            ))}
+                          </tr></thead>
+                          <tbody>
+                            {gp.employees.map((e,i)=>{
+                              const pct=gp.totalShifts>0?(e.shifts/gp.totalShifts)*100:0;
+                              const clr=e.status==="above"?T.green:T.red;
+                              return(
+                                <tr key={i} style={{borderBottom:`1px solid ${T.border}`,background:i%2===0?T.white:"#F9FAFD"}}>
+                                  <td style={{padding:"10px 12px",fontWeight:700,color:T.navy}}>{e.firstName} {e.lastName}</td>
+                                  <td style={{padding:"10px 12px",textAlign:"right",fontFamily:"'DM Mono',monospace",color:T.muted}}>{e.shifts}</td>
+                                  <td style={{padding:"10px 12px",textAlign:"right",fontFamily:"'DM Mono',monospace",color:T.muted}}>{pct.toFixed(1)}%</td>
+                                  <td style={{padding:"10px 12px",textAlign:"right",fontFamily:"'DM Mono',monospace",color:T.muted}}>{fmtUSD(e.expected)}</td>
+                                  <td style={{padding:"10px 12px",textAlign:"right",fontFamily:"'DM Mono',monospace",fontWeight:800,color:T.gold}}>{fmtUSD(e.actual)}</td>
+                                  <td style={{padding:"10px 12px",textAlign:"right",fontFamily:"'DM Mono',monospace",fontWeight:700,color:clr}}>{e.deltaPct>0?"+":""}{e.deltaPct.toFixed(0)}%</td>
+                                  <td style={{padding:"10px 12px"}}><span style={{background:clr+"18",color:clr,border:`1px solid ${clr}40`,padding:"3px 10px",borderRadius:20,fontSize:10,fontWeight:800,letterSpacing:"0.05em",textTransform:"uppercase"}}>{e.status==="above"?"✓ Above":"✗ Below"}</span></td>
+                                </tr>
+                              );
+                            })}
+                          </tbody>
+                        </table>
+                      </div>
+                      <div style={{padding:"10px 20px",background:T.off,fontSize:10,color:T.muted,fontStyle:"italic"}}>
+                        Expected = (employee shifts ÷ team shifts) × week sales. Actual = sum of each day's location sales ÷ employees on shift that day.
+                      </div>
                     </div>
-                    <div style={{overflowX:"auto",marginTop:14}}>
+                  );
+                })}
+
+                {/* Collapsible secondary analytics */}
+                <Section title="📊 Staffing × Sales — Daily Activity" subtitle="Headcount and revenue overlaid by day" defaultOpen={false}>
+                  <StaffingActivityChart week={filteredWeek} squareData={currentSquare}/>
+                </Section>
+
+                <Section title={`⏱ Scheduled vs Worked Hours${reportLocFilter!=="all"?` — ${reportLocFilter}`:""}`} subtitle="Per-employee schedule variance" defaultOpen={false}>
+                  <ScheduleVsActual employees={filteredEmps}/>
+                </Section>
+
+                {salesAttribution.length>0&&(
+                  <Section title="💰 Sales × Staff — by Day" subtitle="Who was on the floor when sales came in" defaultOpen={false} right={<span style={{fontSize:10,color:T.muted,marginRight:6}}>{salesAttribution.length} rows</span>}>
+                    <div style={{overflowX:"auto"}}>
                       <table style={{width:"100%",borderCollapse:"collapse",fontSize:12}}>
                         <thead><tr style={{background:T.off}}>
                           {["Date","Location","Sales","Hours","$/hr","Staff working"].map(h=>(
@@ -1626,43 +1790,7 @@ export default function App(){
                         </tbody>
                       </table>
                     </div>
-                  </div>
-                )}
-
-                {/* Sales allocated per employee (equal split per workers/day) */}
-                {salesPerEmployee.length>0&&(
-                  <div style={{background:T.white,border:`1px solid ${T.border}`,borderRadius:14,padding:22,boxShadow:T.shadow}}>
-                    <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-end",marginBottom:6,flexWrap:"wrap",gap:8}}>
-                      <div>
-                        <div style={{fontWeight:800,color:T.navy,fontSize:15}}>🧑‍🤝‍🧑 Sales Allocated per Employee</div>
-                        <div style={{color:T.muted,fontSize:12,marginTop:3}}>Each day's location sales split equally among the employees who worked that location that day.</div>
-                      </div>
-                      <div style={{fontSize:11,color:T.muted}}>Total allocated: <strong style={{color:T.gold,fontFamily:"'DM Mono',monospace"}}>{fmtUSD(salesPerEmployee.reduce((s,e)=>s+e.salesShare,0))}</strong></div>
-                    </div>
-                    <div style={{overflowX:"auto",marginTop:14}}>
-                      <table style={{width:"100%",borderCollapse:"collapse",fontSize:12}}>
-                        <thead><tr style={{background:T.off}}>
-                          {["Employee","Location","Days w/ Sales","Hours","Pay","Sales Share","$ per Hour"].map(h=>(
-                            <th key={h} style={{padding:"9px 12px",textAlign:["Days w/ Sales","Hours","Pay","Sales Share","$ per Hour"].includes(h)?"right":"left",fontSize:9,fontWeight:800,color:T.muted,letterSpacing:"0.08em",textTransform:"uppercase",borderBottom:`1px solid ${T.border}`}}>{h}</th>
-                          ))}
-                        </tr></thead>
-                        <tbody>
-                          {salesPerEmployee.map((e,i)=>(
-                            <tr key={i} style={{borderBottom:`1px solid ${T.border}`,background:i%2===0?T.white:"#F9FAFD"}}>
-                              <td style={{padding:"10px 12px",fontWeight:700,color:T.navy}} title={e.breakdown.map(b=>`${b.date} · ${b.location}: ${fmtUSD(b.daySales)} ÷ ${b.workers} = ${fmtUSD(b.share)}`).join("\n")}>{e.firstName} {e.lastName}</td>
-                              <td style={{padding:"10px 12px"}}><Pill color={LOC_CLR[e.location]||T.muted}>{e.location||"—"}</Pill></td>
-                              <td style={{padding:"10px 12px",textAlign:"right",fontFamily:"'DM Mono',monospace",color:T.muted}}>{e.daysWithSales}</td>
-                              <td style={{padding:"10px 12px",textAlign:"right",fontFamily:"'DM Mono',monospace",color:T.muted}}>{fmtHHMM(e.hours)}</td>
-                              <td style={{padding:"10px 12px",textAlign:"right",fontFamily:"'DM Mono',monospace",color:T.navy}}>{fmtUSD(e.pay)}</td>
-                              <td style={{padding:"10px 12px",textAlign:"right",fontFamily:"'DM Mono',monospace",fontWeight:800,color:T.gold}}>{fmtUSD(e.salesShare)}</td>
-                              <td style={{padding:"10px 12px",textAlign:"right",fontFamily:"'DM Mono',monospace",color:e.hours>0?T.green:T.muted}}>{e.hours>0?fmtUSD(e.salesShare/e.hours):"—"}</td>
-                            </tr>
-                          ))}
-                        </tbody>
-                      </table>
-                    </div>
-                    <div style={{fontSize:10,color:T.muted,marginTop:10,fontStyle:"italic"}}>Hover an employee name to see the per-day breakdown.</div>
-                  </div>
+                  </Section>
                 )}
 
                 {/* Square + Forms upload */}
