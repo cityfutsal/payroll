@@ -356,6 +356,36 @@ function aggregateSquareRows(rows){
   return Object.values(m).sort((a,b)=>a.date.localeCompare(b.date));
 }
 
+// Migration: pre-v3.3.1 uploads stored dates as broken strings ("Mon May 18")
+// that re-parsed to year 2001. Shift the year forward to match uploadedAt so
+// day-of-week labels and Square sales attribution work without re-uploading.
+function fixWeekYear(week){
+  if(!week) return null;
+  const uploadYear=week.uploadedAt?new Date(week.uploadedAt).getFullYear():new Date().getFullYear();
+  const sample=week.startDate||week.employees?.[0]?.dailyBreakdown?.[0]?.date||"";
+  const m=String(sample).match(/^(\d{4})-/);
+  if(!m) return null;
+  const dataYear=+m[1];
+  if(Math.abs(uploadYear-dataYear)<2) return null;
+  const shift=s=>{
+    if(typeof s!=="string") return s;
+    const m2=s.match(/^\d{4}(-\d{2}-\d{2}.*)$/);
+    return m2?`${uploadYear}${m2[1]}`:s;
+  };
+  return{
+    ...week,
+    startDate:shift(week.startDate),
+    endDate:shift(week.endDate),
+    period:(week.startDate&&week.endDate)?periodLabel(shift(week.startDate),shift(week.endDate)):week.period,
+    employees:(week.employees||[]).map(e=>({
+      ...e,
+      startDate:shift(e.startDate),
+      endDate:shift(e.endDate),
+      dailyBreakdown:(e.dailyBreakdown||[]).map(d=>({...d,date:shift(d.date)})),
+    })),
+  };
+}
+
 async function storeLoad(){
   try{
     const weeks={},attachments={};
@@ -368,6 +398,13 @@ async function storeLoad(){
         if(k.startsWith("cf:att:"))  attachments[k.replace("cf:att:","")] = val;
       }catch{}
     }
+    Object.keys(weeks).forEach(k=>{
+      const fixed=fixWeekYear(weeks[k]);
+      if(fixed){
+        weeks[k]=fixed;
+        try{ localStorage.setItem(`cf:week:${k}`,JSON.stringify(fixed)); }catch{}
+      }
+    });
     return {weeks,attachments};
   }catch{return {weeks:{},attachments:{}};}
 }
