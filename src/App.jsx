@@ -386,32 +386,38 @@ function fixWeekYear(week){
   };
 }
 
+// Storage backend is window.storage from main.jsx — Supabase when env vars
+// are set, localStorage fallback otherwise. Keys are JSON strings under
+// "cf:week:..." and "cf:att:..." prefixes.
+const S=()=>window.storage;
 async function storeLoad(){
   try{
     const weeks={},attachments={};
-    for(let i=0;i<localStorage.length;i++){
-      const k=localStorage.key(i);
-      if(!k.startsWith("cf:")) continue;
-      try{
-        const val=JSON.parse(localStorage.getItem(k));
-        if(k.startsWith("cf:week:")) weeks[k.replace("cf:week:","")] = val;
-        if(k.startsWith("cf:att:"))  attachments[k.replace("cf:att:","")] = val;
-      }catch{}
-    }
-    Object.keys(weeks).forEach(k=>{
+    const {keys=[]} = await S().list("cf:");
+    const pairs = await Promise.all(keys.map(async k=>{
+      const r=await S().get(k);
+      try{ return [k, r?JSON.parse(r.value):null]; }catch{ return [k,null]; }
+    }));
+    pairs.forEach(([k,val])=>{
+      if(val==null) return;
+      if(k.startsWith("cf:week:")) weeks[k.replace("cf:week:","")] = val;
+      else if(k.startsWith("cf:att:"))  attachments[k.replace("cf:att:","")] = val;
+    });
+    // Migrate broken-year stored weeks (pre-v3.3.1 toDateStr bug).
+    await Promise.all(Object.keys(weeks).map(async k=>{
       const fixed=fixWeekYear(weeks[k]);
       if(fixed){
         weeks[k]=fixed;
-        try{ localStorage.setItem(`cf:week:${k}`,JSON.stringify(fixed)); }catch{}
+        try{ await S().set(`cf:week:${k}`,JSON.stringify(fixed)); }catch{}
       }
-    });
+    }));
     return {weeks,attachments};
   }catch{return {weeks:{},attachments:{}};}
 }
-const storeWeek=(k,v)=>localStorage.setItem(`cf:week:${k}`,JSON.stringify(v));
-const storeAtt=(k,v)=>localStorage.setItem(`cf:att:${k}`,JSON.stringify(v));
-const delWeek=k=>localStorage.removeItem(`cf:week:${k}`);
-const delAtt=k=>localStorage.removeItem(`cf:att:${k}`);
+const storeWeek=(k,v)=>S().set(`cf:week:${k}`,JSON.stringify(v));
+const storeAtt =(k,v)=>S().set(`cf:att:${k}`,JSON.stringify(v));
+const delWeek  =k=>S().delete(`cf:week:${k}`);
+const delAtt   =k=>S().delete(`cf:att:${k}`);
 
 /* ─── MICRO COMPONENTS ────────────────────────────────────────────────────── */
 function Pill({children,color=T.navy3}){
@@ -947,6 +953,36 @@ function Sidebar({tab,setTab,weekCount,onExport,onImport}){
   );
 }
 
+/* ─── PASSWORD GATE ───────────────────────────────────────────────────────── */
+// Bump AUTH_KEY's "vN" suffix to force everyone to re-enter after a password change.
+const AUTH_KEY="cf:auth:v1";
+function PasswordGate({onAuth}){
+  const required=import.meta.env.VITE_APP_PASSWORD;
+  const [input,setInput]=useState("");
+  const [err,setErr]=useState(false);
+  const submit=e=>{
+    e.preventDefault();
+    if(input===required){
+      try{localStorage.setItem(AUTH_KEY,"ok");}catch{}
+      onAuth();
+    }else{
+      setErr(true);
+      setInput("");
+    }
+  };
+  return(
+    <div style={{position:"fixed",inset:0,background:`linear-gradient(135deg, ${T.navy} 0%, ${T.navy2} 100%)`,display:"flex",alignItems:"center",justifyContent:"center",fontFamily:"'DM Sans',sans-serif",padding:20}}>
+      <form onSubmit={submit} style={{background:T.white,padding:36,borderRadius:18,boxShadow:T.shadow2,minWidth:340,maxWidth:380}}>
+        <div style={{textAlign:"center",fontFamily:"'Syne',sans-serif",fontWeight:900,fontSize:22,color:T.navy,letterSpacing:"-0.01em"}}>CF Payroll</div>
+        <div style={{textAlign:"center",color:T.muted,fontSize:12,marginTop:6,marginBottom:24}}>Enter the team password</div>
+        <input type="password" autoFocus value={input} onChange={e=>{setInput(e.target.value);setErr(false);}} placeholder="Password" style={{width:"100%",padding:"12px 14px",borderRadius:9,border:`1px solid ${err?T.red:T.border}`,fontSize:14,fontFamily:"inherit",outline:"none",marginBottom:err?6:18,color:T.navy}}/>
+        {err&&<div style={{color:T.red,fontSize:12,marginBottom:14,textAlign:"center",fontWeight:600}}>Incorrect password</div>}
+        <button type="submit" style={{width:"100%",padding:"12px",borderRadius:9,border:"none",background:T.gold,color:T.navy,fontWeight:800,fontSize:14,cursor:"pointer",fontFamily:"inherit"}}>Enter</button>
+      </form>
+    </div>
+  );
+}
+
 /* ═══ MAIN APP ════════════════════════════════════════════════════════════════ */
 export default function App(){
   const [tab,setTab]=useState("upload");
@@ -966,6 +1002,11 @@ export default function App(){
   const [reportLocFilter,setReportLocFilter]=useState("all");
   const [formDetail,setFormDetail]=useState(null);
   const [formFilter,setFormFilter]=useState({type:"all",venue:"all",employee:"",weekScope:"all"});
+  const [authed,setAuthed]=useState(()=>{
+    const req=import.meta.env.VITE_APP_PASSWORD;
+    if(!req) return true; // no password configured = open
+    try{ return localStorage.getItem(AUTH_KEY)==="ok"; }catch{ return false; }
+  });
 
   useEffect(()=>{
     storeLoad().then(({weeks:w,attachments:a})=>{
@@ -1272,6 +1313,7 @@ export default function App(){
       .sort((a,b)=>b.salesShare-a.salesShare);
   },[currentWeek,currentSquare,reportLocFilter]);
 
+  if(!authed) return <PasswordGate onAuth={()=>setAuthed(true)}/>;
   if(loading) return <div style={{height:"100vh",display:"flex",alignItems:"center",justifyContent:"center",background:T.navy}}><div style={{textAlign:"center"}}><div style={{width:48,height:48,background:T.gold,borderRadius:12,display:"flex",alignItems:"center",justifyContent:"center",fontWeight:900,color:T.navy,fontSize:20,margin:"0 auto 14px"}}>CF</div><div style={{color:T.white,fontWeight:700}}>Loading…</div></div></div>;
 
   return(
