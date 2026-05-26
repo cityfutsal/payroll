@@ -69,8 +69,18 @@ function localDate(d){
 }
 function toDateStr(v){
   if(!v) return "";
+  const pad=n=>String(n).padStart(2,"0");
   if(typeof v==="number"){const d=new Date(Math.round((v-25569)*864e5));return d.toISOString().slice(0,10);}
-  return String(v).slice(0,10);
+  if(v instanceof Date){return `${v.getFullYear()}-${pad(v.getMonth()+1)}-${pad(v.getDate())}`;}
+  const s=String(v).trim();
+  if(/^\d{4}-\d{2}-\d{2}/.test(s)) return s.slice(0,10);
+  let m=s.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})/);                       // M/D/YYYY
+  if(m) return `${m[3]}-${pad(m[1])}-${pad(m[2])}`;
+  m=s.match(/^(\d{1,2})\/(\d{1,2})\/(\d{2})\b/);                          // M/D/YY
+  if(m) return `20${m[3]}-${pad(m[1])}-${pad(m[2])}`;
+  const d=new Date(s);
+  if(!isNaN(d)) return `${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())}`;
+  return s.slice(0,10);
 }
 function weekKey(d){const dt=localDate(d),j=new Date(dt.getFullYear(),0,1),w=Math.ceil(((dt-j)/864e5+j.getDay()+1)/7);return `${dt.getFullYear()}-W${String(w).padStart(2,"0")}`;}
 function monthKey(d){const dt=localDate(d);return `${dt.getFullYear()}-${String(dt.getMonth()+1).padStart(2,"0")}`;}
@@ -1135,20 +1145,24 @@ export default function App(){
     return m;
   },[filteredSubs]);
 
-  // ── Sales × Staff attribution: per-day × per-location rows for current week
+  // ── Sales × Staff attribution: per-day × per-location rows for current week.
+  // Normalizes legacy stored data: dailyBreakdown.date may be "Tue May 26" or
+  // "5/26/2026" from older parseExcel; employee.location may be full venue name.
   const salesAttribution=useMemo(()=>{
     if(!currentWeek||!currentSquare?.length) return [];
     const rows=[];
     currentSquare.forEach(day=>{
+      const dayIso=toDateStr(day.date);
       const locsForDay=day.byLocation?Object.keys(day.byLocation):[];
       const list=locsForDay.length?locsForDay:(day.gross>0?["Unknown"]:[]);
       list.forEach(loc=>{
         const sales=day.byLocation?(day.byLocation[loc]||0):day.gross;
         if(sales<=0) return;
+        const locNorm=normalizeVenue(loc);
         const staff=currentWeek.employees
-          .filter(e=>loc==="Unknown"||e.location===loc)
+          .filter(e=>loc==="Unknown"||normalizeVenue(e.location)===locNorm||e.location===loc)
           .map(e=>{
-            const d=(e.dailyBreakdown||[]).find(x=>x.date===day.date);
+            const d=(e.dailyBreakdown||[]).find(x=>toDateStr(x.date)===dayIso);
             if(!d) return null;
             const hours=d.rate>0?d.pay/d.rate:0;
             return hours>0?{name:`${e.firstName} ${e.lastName.charAt(0)}.`,fullName:`${e.firstName} ${e.lastName}`,hours,pay:d.pay,rate:d.rate}:null;
@@ -1156,7 +1170,7 @@ export default function App(){
           .filter(Boolean)
           .sort((a,b)=>b.hours-a.hours);
         const staffHours=staff.reduce((s,e)=>s+e.hours,0);
-        rows.push({date:day.date,location:loc,sales,staff,staffHours});
+        rows.push({date:dayIso,location:loc,sales,staff,staffHours});
       });
     });
     return rows.sort((a,b)=>a.date.localeCompare(b.date)||a.location.localeCompare(b.location));
@@ -1177,13 +1191,15 @@ export default function App(){
       };
     });
     currentSquare.forEach(day=>{
+      const dayIso=toDateStr(day.date);
       const dailyLocs=day.byLocation?Object.entries(day.byLocation):[];
       const list=dailyLocs.length?dailyLocs:(day.gross>0?[["Unknown",day.gross]]:[]);
       list.forEach(([loc,sales])=>{
         if(sales<=0) return;
+        const locNorm=normalizeVenue(loc);
         const workers=currentWeek.employees.filter(e=>
-          (loc==="Unknown"||e.location===loc)&&
-          (e.dailyBreakdown||[]).some(d=>d.date===day.date&&d.pay>0)
+          (loc==="Unknown"||normalizeVenue(e.location)===locNorm||e.location===loc)&&
+          (e.dailyBreakdown||[]).some(d=>toDateStr(d.date)===dayIso&&d.pay>0)
         );
         if(!workers.length) return;
         const share=sales/workers.length;
@@ -1192,7 +1208,7 @@ export default function App(){
           if(!map[k]) return;
           map[k].salesShare+=share;
           map[k].daysWithSales+=1;
-          map[k].breakdown.push({date:day.date,location:loc,daySales:sales,workers:workers.length,share});
+          map[k].breakdown.push({date:dayIso,location:loc,daySales:sales,workers:workers.length,share});
         });
       });
     });
