@@ -78,7 +78,8 @@ function parseHHMM(v){
 }
 function localDate(d){
   const s=String(d||"").slice(0,10);
-  return s.match(/^\d{4}-\d{2}-\d{2}$/)?new Date(s+"T12:00:00"):new Date(d);
+  // Midnight (not noon) so weekKey math stays integer-day clean.
+  return s.match(/^\d{4}-\d{2}-\d{2}$/)?new Date(s+"T00:00:00"):new Date(d);
 }
 function toDateStr(v){
   if(!v) return "";
@@ -95,7 +96,21 @@ function toDateStr(v){
   if(!isNaN(d)) return `${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())}`;
   return s.slice(0,10);
 }
-function weekKey(d){const dt=localDate(d),j=new Date(dt.getFullYear(),0,1),w=Math.ceil(((dt-j)/864e5+j.getDay()+1)/7);return `${dt.getFullYear()}-W${String(w).padStart(2,"0")}`;}
+// Mon-Sun aligned week number: snap the date to its own Monday, then count
+// how many 7-day windows it is from the year's first Monday (which may fall
+// in the prior calendar year — Dec 29 2025 for week 1 of 2026, etc).
+function weekKey(d){
+  const dt=localDate(d);
+  const dow=dt.getDay(); // 0=Sun..6=Sat
+  const offsetToMon=dow===0?-6:1-dow;
+  const mon=new Date(dt.getFullYear(),dt.getMonth(),dt.getDate()+offsetToMon);
+  const j=new Date(mon.getFullYear(),0,1);
+  const jDow=j.getDay();
+  const jOff=jDow===0?-6:1-jDow;
+  const yearStartMon=new Date(mon.getFullYear(),0,1+jOff);
+  const w=Math.floor(Math.round((mon-yearStartMon)/864e5)/7)+1;
+  return `${mon.getFullYear()}-W${String(w).padStart(2,"0")}`;
+}
 function monthKey(d){const dt=localDate(d);return `${dt.getFullYear()}-${String(dt.getMonth()+1).padStart(2,"0")}`;}
 function yearKey(d){return String(localDate(d).getFullYear());}
 function periodLabel(s,e){const f=d=>localDate(d).toLocaleDateString("en-US",{month:"short",day:"numeric",year:"numeric"});return `${f(s)} – ${f(e)}`;}
