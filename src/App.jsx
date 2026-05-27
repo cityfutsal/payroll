@@ -1103,10 +1103,16 @@ export default function App(){
       setWeeks(w);setAttachments(a);
       const keys=Object.keys(w).sort();
       if(keys.length){setSelectedWeek(keys[keys.length-1]);setCompareWeek(keys[keys.length-2]||null);}
-      // Load square data from attachments
+      // Load square data from attachments — distribute rows to their actual
+      // week (not the attachment's stored weekKey) so legacy uploads that
+      // landed under the wrong week self-heal.
       const sqRaw={};
       Object.entries(a).forEach(([k,v])=>{
-        if(v.type==="square"&&v.parsedData) sqRaw[v.weekKey]=(sqRaw[v.weekKey]||[]).concat(v.parsedData);
+        if(v.type!=="square"||!v.parsedData) return;
+        v.parsedData.forEach(row=>{
+          const wk=row.date&&/^\d{4}-\d{2}-\d{2}$/.test(row.date)?weekKey(row.date):v.weekKey;
+          sqRaw[wk]=(sqRaw[wk]||[]).concat(row);
+        });
       });
       const sq={};
       Object.entries(sqRaw).forEach(([wk,rows])=>{sq[wk]=aggregateSquareRows(rows);});
@@ -1147,13 +1153,12 @@ export default function App(){
     setTab("report");
   };
 
-  const handleSquareUpload=async(files,weekK)=>{
+  const handleSquareUpload=async(files,fallbackWeekK)=>{
     for(const f of files){
       try{
         const data=await parseSquare(f);
         if(!data.length){toast2("No sales data found in "+f.name,"warn");continue;}
 
-        // Separate daily rows from summary rows
         // Detect location from filename (match any LOCS value case-insensitive)
         const nameLower=(f.name||"").toLowerCase();
         let detectedLoc="Unknown";
@@ -1161,27 +1166,42 @@ export default function App(){
         const dailyRows=data.filter(d=>!d.isWeeklyTotal).map(d=>({...d,location:detectedLoc}));
         const summaryRows=data.filter(d=>d.isWeeklyTotal);
 
-        const attKey=`${weekK}:square:${Date.now()}:${f.name}`;
-        const val={name:f.name,type:"square",weekKey:weekK,size:f.size,
+        // Derive the attachment's primary week from the file's first date so
+        // the file appears under that week's Documents panel (for delete UI).
+        // The aggregated daily data below is distributed by each row's own
+        // week, so multi-week files still route correctly.
+        const firstDate=dailyRows[0]?.date;
+        const attWeekK=firstDate&&/^\d{4}-\d{2}-\d{2}$/.test(firstDate)?weekKey(firstDate):fallbackWeekK;
+
+        const attKey=`${attWeekK}:square:${Date.now()}:${f.name}`;
+        const val={name:f.name,type:"square",weekKey:attWeekK,size:f.size,
           uploadedAt:new Date().toISOString(),parsedData:dailyRows,summaryData:summaryRows};
         await storeAtt(attKey,val);
         setAttachments(a=>({...a,[attKey]:val}));
 
         if(dailyRows.length>0){
+          // Group rows by their actual week (a file may span >1 week).
+          const byWeek={};
+          dailyRows.forEach(row=>{
+            const wk=row.date&&/^\d{4}-\d{2}-\d{2}$/.test(row.date)?weekKey(row.date):attWeekK;
+            (byWeek[wk]=byWeek[wk]||[]).push(row);
+          });
           setSquareByWeek(sq=>{
-            const curRaw=(sq[weekK]||[]).reduce((acc,d)=>{
-              // expand existing aggregated rows back into raw-like rows for merging
-              if(d.byLocation){
-                Object.entries(d.byLocation).forEach(([loc,g])=>acc.push({date:d.date,gross:g,location:loc}));
-              } else { acc.push({date:d.date,gross:d.gross,location:d.location||"Unknown"}); }
-              return acc;
-            },[]);
-            const mergedRaw=[...curRaw,...dailyRows];
-            const aggregated=aggregateSquareRows(mergedRaw);
-            return{...sq,[weekK]:aggregated};
+            const result={...sq};
+            Object.entries(byWeek).forEach(([wk,rows])=>{
+              const curRaw=(result[wk]||[]).reduce((acc,d)=>{
+                if(d.byLocation){
+                  Object.entries(d.byLocation).forEach(([loc,g])=>acc.push({date:d.date,gross:g,location:loc}));
+                } else { acc.push({date:d.date,gross:d.gross,location:d.location||"Unknown"}); }
+                return acc;
+              },[]);
+              result[wk]=aggregateSquareRows([...curRaw,...rows]);
+            });
+            return result;
           });
           const total=dailyRows.reduce((s,d)=>s+d.gross,0);
-          toast2(`✓ ${f.name}: ${dailyRows.length} days loaded · ${fmtUSD(total)}`);
+          const wkCount=Object.keys(byWeek).length;
+          toast2(`✓ ${f.name}: ${dailyRows.length} days · ${fmtUSD(total)}${wkCount>1?` across ${wkCount} weeks`:""}`);
         } else if(summaryRows.length>0){
           const total=summaryRows.reduce((s,d)=>s+d.gross,0);
           toast2(`✓ ${f.name}: Weekly total ${fmtUSD(total)} recorded`);
