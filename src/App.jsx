@@ -219,80 +219,85 @@ async function parseExcel(file){
 }
 
 async function parseSquare(file){
-  // Square exports: title and header are in the SAME first quoted field separated by \n
-  // Format: "Sales summary - Daily\nReporting day...","5/18/2026","5/19/2026",...
-  // Data rows: "Gross sales","$230.17","$264.45",...  (values are quoted, commas inside quotes)
+  // Square exports vary in shape between report types:
+  //   - "Sales summary - Daily"  → first line is the title, second line has date headers
+  //   - "Sales summary - Weekly" → single total
+  //   - "Item Sales" etc.        → may put title later, may have a blank/metadata line first
+  // Strategy: search the WHOLE file for (a) a row whose first cell looks like dates and
+  // (b) the first row whose first cell starts with "gross"; tolerate BOM, whitespace,
+  // any case, and any line position.
   return new Promise((res,rej)=>{
     const reader=new FileReader();
     reader.onload=e=>{
       try{
-        const raw=e.target.result;
-        // Normalize line endings and split
+        let raw=String(e.target.result||"");
+        // Strip UTF-8 BOM if present
+        if(raw.charCodeAt(0)===0xFEFF) raw=raw.slice(1);
         const lines=raw.replace(/\r\n/g,'\n').replace(/\r/g,'\n').split('\n');
         if(!lines.length){rej("Empty file");return;}
 
-        // Line 0: title line e.g. '"Sales summary - Daily'
-        const titleLine=(lines[0]||"").replace(/"/g,'').trim();
-        const isDaily=titleLine.includes('Daily');
-        const isSummary=titleLine.includes('Summary');
-
-        // Helper: parse a CSV line respecting quoted fields
         function parseCsvLine(line){
-          const result=[];
-          let cur='', inQ=false;
+          const out=[];let cur='',inQ=false;
           for(let i=0;i<line.length;i++){
             const ch=line[i];
             if(ch==='"'){inQ=!inQ;}
-            else if(ch===','&&!inQ){result.push(cur.trim());cur='';}
+            else if(ch===','&&!inQ){out.push(cur.trim());cur='';}
             else{cur+=ch;}
           }
-          result.push(cur.trim());
-          return result;
+          out.push(cur.trim());
+          return out;
         }
-
-        // Helper: parse Square money string e.g. "$1,367.71" or "($125.88)"
         function parseMoney(s){
-          s=(s||"").replace(/"/g,'').replace(/\$/g,'').replace(/,/g,'').trim();
+          s=String(s||"").replace(/"/g,'').replace(/\$/g,'').replace(/,/g,'').trim();
+          if(!s) return 0;
           if(s.startsWith('(')&&s.endsWith(')')) return -parseFloat(s.slice(1,-1))||0;
           return parseFloat(s)||0;
         }
-
-        // Line 1: header row — starts with the end of the title's quoted field
-        // e.g. 'Reporting day (12:00 AM-11:59 PM CT)","5/18/2026","5/19/2026",...'
-        const headerLine=(lines[1]||"");
-        const headerParts=headerLine.split('","');
-        const dates=headerParts.slice(1).map(d=>d.replace(/"/g,'').trim());
-
-        const results=[];
-
-        for(let i=2;i<lines.length;i++){
-          const line=lines[i].trim();
-          if(!line) continue;
-          const cols=parseCsvLine(line);
-          const metric=(cols[0]||"").toLowerCase();
-          if(!metric.startsWith('gross')) continue;
-
-          if(isDaily){
-            dates.forEach((dateStr,di)=>{
-              const val=parseMoney(cols[di+1]||"0");
-              if(!dateStr||val<=0) return;
-              // Convert M/D/YYYY to YYYY-MM-DD
-              const p=dateStr.split('/');
-              if(p.length===3){
-                const iso=`${p[2]}-${p[0].padStart(2,'0')}-${p[1].padStart(2,'0')}`;
-                results.push({date:iso,gross:Math.round(val*100)/100});
-              }
-            });
-          } else {
-            // Summary — single total
-            const val=parseMoney(cols[1]||"0");
-            if(val>0) results.push({date:'summary',gross:Math.round(val*100)/100,isWeeklyTotal:true});
-          }
-          break; // found Gross sales row, done
+        function isDateLike(s){return /^\d{1,2}\/\d{1,2}\/\d{2,4}$/.test(String(s||"").replace(/"/g,'').trim());}
+        function toIso(s){
+          const p=String(s||"").replace(/"/g,'').trim().split('/');
+          if(p.length!==3) return null;
+          const yyyy=p[2].length===2?`20${p[2]}`:p[2];
+          return `${yyyy}-${p[0].padStart(2,'0')}-${p[1].padStart(2,'0')}`;
         }
 
-        if(!results.length){rej("No sales data found. Make sure you're uploading a Square Sales Summary CSV (Daily or Summary format).");return;}
-        // results: [{date: 'YYYY-MM-DD'|'summary', gross: number, isWeeklyTotal?:bool}, ...]
+        // Find the date-header row anywhere in the file (any row where 2+ cells are M/D/Y).
+        let dates=null;
+        for(let i=0;i<Math.min(lines.length,15);i++){
+          const cols=parseCsvLine(lines[i]);
+          const dateCells=cols.filter(isDateLike);
+          if(dateCells.length>=2){ dates=cols.map(c=>isDateLike(c)?c.replace(/"/g,'').trim():""); break; }
+        }
+
+        // Find the first row whose first cell starts with "gross" (case-insensitive).
+        let grossCols=null;
+        for(let i=0;i<lines.length;i++){
+          const cols=parseCsvLine(lines[i]);
+          const m=(cols[0]||"").toLowerCase().replace(/"/g,'').trim();
+          if(m.startsWith('gross')){ grossCols=cols; break; }
+        }
+
+        const results=[];
+        if(grossCols){
+          if(dates){
+            dates.forEach((dateStr,di)=>{
+              if(!dateStr) return;
+              const val=parseMoney(grossCols[di+1]||"0");
+              if(val<=0) return;
+              const iso=toIso(dateStr);
+              if(iso) results.push({date:iso,gross:Math.round(val*100)/100});
+            });
+          } else {
+            const val=parseMoney(grossCols[1]||"0");
+            if(val>0) results.push({date:'summary',gross:Math.round(val*100)/100,isWeeklyTotal:true});
+          }
+        }
+
+        if(!results.length){
+          const preview=lines.slice(0,3).map(l=>l.slice(0,80)).join(" | ");
+          rej(`No Gross sales row found. First lines: ${preview}`);
+          return;
+        }
         res(results);
       }catch(err){rej("Parse error: "+String(err));}
     };
