@@ -33,6 +33,15 @@ const FORM_TYPES = {
   hourly:  {id:"hourly",  label:"Hourly Reset",       icon:"🔄", color:"#2563EB"},
   other:   {id:"other",   label:"Form",               icon:"📋", color:"#7B8DAB"},
 };
+// Detect a LOCS entry from a filename. "TheColony-daily-sales.csv" → "The Colony".
+function detectLocFromName(name=""){
+  const norm=String(name).toLowerCase().replace(/[\s_\-.]+/g,'');
+  for(const L of LOCS){
+    if(norm.includes(L.toLowerCase().replace(/[\s_\-.]+/g,''))) return L;
+  }
+  return "Unknown";
+}
+
 function normalizeVenue(s=""){
   const v=String(s).toLowerCase();
   if(v.includes("colony")) return "The Colony";
@@ -448,6 +457,19 @@ async function storeLoad(){
         weeks[k]=fixed;
         try{ await S().set(`cf:week:${k}`,JSON.stringify(fixed)); }catch{}
       }
+    }));
+    // Relabel Square attachments whose parsedData rows are tagged Unknown
+    // but whose filename clearly identifies a known venue (pre-v3.8.2 uploads).
+    await Promise.all(Object.entries(attachments).map(async ([k,v])=>{
+      if(v?.type!=="square"||!Array.isArray(v.parsedData)) return;
+      const detected=detectLocFromName(v.name||"");
+      if(detected==="Unknown") return;
+      const needsFix=v.parsedData.some(r=>!r.location||r.location==="Unknown");
+      if(!needsFix) return;
+      const fixedRows=v.parsedData.map(r=>({...r,location:r.location&&r.location!=="Unknown"?r.location:detected}));
+      const fixedAtt={...v,parsedData:fixedRows};
+      attachments[k]=fixedAtt;
+      try{ await S().set(`cf:att:${k}`,JSON.stringify(fixedAtt)); }catch{}
     }));
     return {weeks,attachments};
   }catch{return {weeks:{},attachments:{}};}
@@ -1164,10 +1186,9 @@ export default function App(){
         const data=await parseSquare(f);
         if(!data.length){toast2("No sales data found in "+f.name,"warn");continue;}
 
-        // Detect location from filename (match any LOCS value case-insensitive)
-        const nameLower=(f.name||"").toLowerCase();
-        let detectedLoc="Unknown";
-        for(const L of LOCS){if(nameLower.includes(L.toLowerCase())){detectedLoc=L;break;}}
+        // Detect location from filename. Normalize both sides (strip spaces /
+        // hyphens / underscores) so "TheColony-daily..." matches "The Colony".
+        const detectedLoc=detectLocFromName(f.name);
         const dailyRows=data.filter(d=>!d.isWeeklyTotal).map(d=>({...d,location:detectedLoc}));
         const summaryRows=data.filter(d=>d.isWeeklyTotal);
 
