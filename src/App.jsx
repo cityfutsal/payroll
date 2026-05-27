@@ -525,19 +525,20 @@ function Section({title,icon,subtitle,right,defaultOpen=false,children}){
 /* ─── SCHEDULED VS ACTUAL CHART ───────────────────────────────────────────── */
 function ScheduleVsActual({employees}){
   const data=useMemo(()=>
-    [...employees]
-      .filter(e=>e.scheduledHours>0||e.hours>0)
-      .sort((a,b)=>b.hours-a.hours)
-      .map(e=>({
-        name:`${e.firstName} ${e.lastName.charAt(0)}.`,
-        fullName:`${e.firstName} ${e.lastName}`,
+    (employees||[])
+      .map(e=>({e,sched:Number(e.scheduledHours)||0,worked:Number(e.hours)||0}))
+      .filter(({sched,worked})=>sched>0||worked>0)
+      .sort((a,b)=>b.worked-a.worked)
+      .map(({e,sched,worked})=>({
+        name:`${e.firstName} ${e.lastName?.charAt(0)||""}.`,
+        fullName:`${e.firstName} ${e.lastName||""}`,
         role:e.role,
         location:e.location,
-        scheduled:+e.scheduledHours.toFixed(2),
-        worked:+e.hours.toFixed(2),
-        diff:+((e.hours-e.scheduledHours)).toFixed(2),
-        over:e.hours>e.scheduledHours?+(e.hours-e.scheduledHours).toFixed(2):0,
-        under:e.hours<e.scheduledHours?+(e.scheduledHours-e.hours).toFixed(2):0,
+        scheduled:+sched.toFixed(2),
+        worked:+worked.toFixed(2),
+        diff:+(worked-sched).toFixed(2),
+        over:worked>sched?+(worked-sched).toFixed(2):0,
+        under:worked<sched?+(sched-worked).toFixed(2):0,
       }))
   ,[employees]);
 
@@ -652,14 +653,16 @@ function StaffingActivityChart({week,squareData}){
     const byDate={};
     week.employees.forEach(emp=>{
       (emp.dailyBreakdown||[]).forEach(d=>{
-        if(!byDate[d.date]) byDate[d.date]={date:d.date,headcount:0,totalPay:0,byRole:{}};
-        byDate[d.date].headcount+=1;
-        byDate[d.date].totalPay+=d.pay;
+        const iso=toDateStr(d.date);
+        if(!iso) return;
+        if(!byDate[iso]) byDate[iso]={date:iso,headcount:0,totalPay:0,byRole:{}};
+        byDate[iso].headcount+=1;
+        byDate[iso].totalPay+=Number(d.pay)||0;
         const role=emp.role||"Venue Host";
-        byDate[d.date].byRole[role]=(byDate[d.date].byRole[role]||0)+1;
+        byDate[iso].byRole[role]=(byDate[iso].byRole[role]||0)+1;
       });
     });
-    return Object.values(byDate).sort((a,b)=>a.date.localeCompare(b.date)).map(d=>({
+    return Object.values(byDate).sort((a,b)=>String(a.date).localeCompare(String(b.date))).map(d=>({
       ...d,
       day:DAYS[dayOfWeek(d.date)]+" "+shortDate(d.date),
       dateStr:d.date,
