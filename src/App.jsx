@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef, useMemo } from "react";
+import React, { useState, useEffect, useRef, useMemo, Component } from "react";
 import * as XLSX from "xlsx";
 import {
   BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer,
@@ -1005,6 +1005,41 @@ function Sidebar({tab,setTab,weekCount,onExport,onImport}){
   );
 }
 
+/* ─── ERROR BOUNDARY ──────────────────────────────────────────────────────── */
+// Catches render errors so a single bad memo or chart can't blank the page.
+export class ErrorBoundary extends Component {
+  constructor(props){ super(props); this.state={err:null,info:null}; }
+  static getDerivedStateFromError(err){ return {err}; }
+  componentDidCatch(err,info){
+    this.setState({info});
+    try{ console.error("App crashed:",err,info?.componentStack); }catch{}
+  }
+  render(){
+    if(this.state.err){
+      const msg=this.state.err?.message||String(this.state.err);
+      const stack=this.state.err?.stack||"";
+      return(
+        <div style={{minHeight:"100vh",background:T.off,padding:32,fontFamily:"'DM Sans',sans-serif"}}>
+          <div style={{maxWidth:760,margin:"0 auto"}}>
+            <div style={{fontFamily:"'Syne',sans-serif",fontWeight:900,fontSize:24,color:T.navy,marginBottom:8}}>Something broke</div>
+            <div style={{color:T.muted,fontSize:13,marginBottom:18}}>The app caught a crash and stopped it from blanking the page. Your data is still safe in Supabase — refresh to recover.</div>
+            <div style={{display:"flex",gap:10,marginBottom:20}}>
+              <button onClick={()=>this.setState({err:null,info:null})} style={{padding:"10px 22px",borderRadius:9,border:"none",background:T.gold,color:T.navy,cursor:"pointer",fontWeight:800,fontSize:13,fontFamily:"inherit"}}>Try again</button>
+              <button onClick={()=>location.reload()} style={{padding:"10px 22px",borderRadius:9,border:`1px solid ${T.border}`,background:T.white,color:T.navy,cursor:"pointer",fontWeight:700,fontSize:13,fontFamily:"inherit"}}>Reload page</button>
+            </div>
+            <div style={{background:T.white,border:`1px solid ${T.border}`,borderRadius:10,padding:16,fontSize:12,color:T.red,fontFamily:"'DM Mono',monospace",overflow:"auto",marginBottom:12}}>
+              <strong>{msg}</strong>
+            </div>
+            {stack&&<pre style={{background:T.navy,color:T.gold+"CC",padding:14,borderRadius:10,fontSize:10,overflow:"auto",fontFamily:"'DM Mono',monospace",maxHeight:400}}>{stack}</pre>}
+            {this.state.info?.componentStack&&<pre style={{background:T.white,border:`1px solid ${T.border}`,color:T.muted,padding:14,borderRadius:10,fontSize:10,overflow:"auto",fontFamily:"'DM Mono',monospace",maxHeight:300,marginTop:8}}>{this.state.info.componentStack}</pre>}
+          </div>
+        </div>
+      );
+    }
+    return this.props.children;
+  }
+}
+
 /* ─── PASSWORD GATE ───────────────────────────────────────────────────────── */
 // Bump AUTH_KEY's "vN" suffix to force everyone to re-enter after a password change.
 const AUTH_KEY="cf:auth:v1";
@@ -1385,7 +1420,7 @@ export default function App(){
         workersByDay[dayIso]=locEmps.filter(em=>(em.dailyBreakdown||[]).some(d=>toDateStr(d.date)===dayIso&&(d.pay>0||d.fromSummary)));
       });
       const empData=locEmps.map(e=>{
-        const shifts=(e.dailyBreakdown||[]).filter(d=>d.pay>0).length;
+        const shifts=(e.dailyBreakdown||[]).filter(d=>d.pay>0||d.fromSummary).length;
         let actual=0;
         currentSquare.forEach(day=>{
           const dayIso=toDateStr(day.date);

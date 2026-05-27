@@ -1,6 +1,6 @@
 import React from 'react'
 import ReactDOM from 'react-dom/client'
-import App from './App.jsx'
+import App, { ErrorBoundary } from './App.jsx'
 
 async function initStorage() {
   const SUPABASE_URL      = import.meta.env.VITE_SUPABASE_URL;
@@ -9,10 +9,33 @@ async function initStorage() {
     const h = {'Content-Type':'application/json','apikey':SUPABASE_ANON_KEY,'Authorization':`Bearer ${SUPABASE_ANON_KEY}`};
     const base = `${SUPABASE_URL}/rest/v1/cf_storage`;
     window.storage = {
-      get: async k => { const r=await fetch(`${base}?key=eq.${encodeURIComponent(k)}&select=key,value`,{headers:h}); const d=await r.json(); return d?.[0]?{key:k,value:d[0].value}:null; },
-      set: async (k,v) => { await fetch(base,{method:'POST',headers:{...h,'Prefer':'resolution=merge-duplicates'},body:JSON.stringify({key:k,value:v,updated_at:new Date().toISOString()})}); return {key:k,value:v}; },
-      delete: async k => { await fetch(`${base}?key=eq.${encodeURIComponent(k)}`,{method:'DELETE',headers:h}); return {key:k,deleted:true}; },
-      list: async (p='') => { const r=await fetch(p?`${base}?key=like.${encodeURIComponent(p+'%')}&select=key`:`${base}?select=key`,{headers:h}); const d=await r.json(); return {keys:Array.isArray(d)?d.map(x=>x.key):[]}; },
+      get: async k => {
+        const r = await fetch(`${base}?key=eq.${encodeURIComponent(k)}&select=key,value`, {headers:h});
+        if (!r.ok) throw new Error(`Supabase GET ${k}: ${r.status} ${await r.text().catch(()=>'')}`);
+        const d = await r.json();
+        return d?.[0] ? {key:k, value:d[0].value} : null;
+      },
+      set: async (k, v) => {
+        const r = await fetch(base, {
+          method:'POST',
+          headers:{...h, 'Prefer':'resolution=merge-duplicates'},
+          body: JSON.stringify({key:k, value:v, updated_at:new Date().toISOString()}),
+        });
+        if (!r.ok) throw new Error(`Supabase SET ${k} failed: ${r.status} ${await r.text().catch(()=>'')}`);
+        return {key:k, value:v};
+      },
+      delete: async k => {
+        const r = await fetch(`${base}?key=eq.${encodeURIComponent(k)}`, {method:'DELETE', headers:h});
+        if (!r.ok) throw new Error(`Supabase DELETE ${k}: ${r.status}`);
+        return {key:k, deleted:true};
+      },
+      list: async (p='') => {
+        const url = p ? `${base}?key=like.${encodeURIComponent(p+'%')}&select=key` : `${base}?select=key`;
+        const r = await fetch(url, {headers:h});
+        if (!r.ok) throw new Error(`Supabase LIST: ${r.status}`);
+        const d = await r.json();
+        return {keys: Array.isArray(d) ? d.map(x=>x.key) : []};
+      },
     };
   } else {
     window.storage = {
@@ -26,6 +49,10 @@ async function initStorage() {
 
 initStorage().then(()=>{
   ReactDOM.createRoot(document.getElementById('root')).render(
-    <React.StrictMode><App/></React.StrictMode>
+    <React.StrictMode>
+      <ErrorBoundary>
+        <App/>
+      </ErrorBoundary>
+    </React.StrictMode>
   );
 });
